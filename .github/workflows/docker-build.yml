@@ -71,6 +71,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Workaround: Server doesn't send intermediate cert in chain
+      # TODO: Remove once server is configured to send full chain
+      - name: Install DigiCert intermediate certificate
+        run: |
+          curl -fsSL https://cacerts.digicert.com/DigiCertGlobalG2TLSRSASHA2562020CA1-1.crt.pem \
+            | sudo tee /usr/local/share/ca-certificates/digicert-g2-intermediate.crt
+          sudo update-ca-certificates
+          # Configure for Docker daemon
+          sudo mkdir -p /etc/docker/certs.d/${{ inputs.registry_host }}
+          sudo cp /usr/local/share/ca-certificates/digicert-g2-intermediate.crt \
+            /etc/docker/certs.d/${{ inputs.registry_host }}/ca.crt
+
       - name: Set build variables
         id: vars
         run: |
