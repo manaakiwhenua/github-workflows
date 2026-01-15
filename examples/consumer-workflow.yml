@@ -1,0 +1,64 @@
+# Example: Complete CI/CD workflow for a consumer repository
+#
+# Copy this to your repository as .github/workflows/ci.yml and adjust as needed.
+# This example shows building on push to main and deploying to dev automatically,
+# with manual promotion to prod.
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      deploy_env:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - test
+          - prod
+
+jobs:
+  # Build and push Docker images
+  build:
+    uses: manaakiwhenua/github-workflows/.github/workflows/docker-build.yml@main
+    with:
+      bake_file: docker-bake.hcl
+      bake_target: default
+      # Only push on main branch, not PRs
+      push: ${{ github.event_name != 'pull_request' }}
+    secrets:
+      ARTIFACTORY_HOST: ${{ secrets.ARTIFACTORY_HOST }}
+      ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+      ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+
+  # Auto-deploy to dev on push to main
+  deploy-dev:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    uses: manaakiwhenua/github-workflows/.github/workflows/k8s-deploy.yml@main
+    with:
+      environment: dev
+      cluster: tak-k8s-nonprod
+      build_id: ${{ needs.build.outputs.build_id }}
+    secrets:
+      ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+      GITOPS_SSH_KEY: ${{ secrets.GITOPS_SSH_KEY }}
+
+  # Manual deployment via workflow_dispatch
+  deploy-manual:
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    uses: manaakiwhenua/github-workflows/.github/workflows/k8s-deploy.yml@main
+    with:
+      environment: ${{ inputs.deploy_env }}
+      cluster: ${{ inputs.deploy_env == 'prod' && 'tak-k8s-prod' || 'tak-k8s-nonprod' }}
+      build_id: ${{ needs.build.outputs.build_id }}
+    secrets:
+      ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+      GITOPS_SSH_KEY: ${{ secrets.GITOPS_SSH_KEY }}

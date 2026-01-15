@@ -1,0 +1,295 @@
+# Reusable Kubernetes Deploy Workflow
+# Equivalent to k8s-deploy-pipe for Bitbucket
+#
+# Updates image references in k8s-apps-config GitOps repository.
+# ArgoCD watches the repo and syncs changes to the cluster.
+
+name: K8s Deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Target environment (dev, test, prod)'
+        type: string
+        required: true
+      cluster:
+        description: 'Target cluster name'
+        type: string
+        default: tak-k8s-nonprod
+      build_id:
+        description: 'Build identifier from docker-build workflow'
+        type: string
+        required: true
+      app_name:
+        description: 'Application name (defaults to repository name)'
+        type: string
+        default: ''
+      components:
+        description: 'Comma-separated components to deploy (empty = all from build index)'
+        type: string
+        default: ''
+      container_name:
+        description: 'Container name to update (empty = first container)'
+        type: string
+        default: ''
+      gitops_repo:
+        description: 'GitOps repository (org/repo format)'
+        type: string
+        default: landcareresearch/k8s-apps-config
+      gitops_branch:
+        description: 'GitOps repository branch'
+        type: string
+        default: main
+      image_namespace:
+        description: 'Image namespace in registry'
+        type: string
+        default: mwlr-private
+      manifest_path_pattern:
+        description: 'Custom manifest path pattern (uses envsubst)'
+        type: string
+        default: ''
+      commit_message_prefix:
+        description: 'Commit message prefix'
+        type: string
+        default: chore
+    secrets:
+      ARTIFACTORY_HOST:
+        required: false
+        description: 'Artifactory hostname (defaults to artifactory.landcareresearch.co.nz)'
+      ARTIFACTORY_TOKEN:
+        required: true
+        description: 'Artifactory token for fetching build metadata'
+      GITOPS_SSH_KEY:
+        required: true
+        description: 'SSH private key with write access to GitOps repo'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - name: Set variables
+        id: vars
+        run: |
+          APP_NAME="${{ inputs.app_name }}"
+          if [[ -z "$APP_NAME" ]]; then
+            APP_NAME="${{ github.event.repository.name }}"
+          fi
+          
+          ARTIFACTORY_HOST="${{ secrets.ARTIFACTORY_HOST }}"
+          if [[ -z "$ARTIFACTORY_HOST" ]]; then
+            ARTIFACTORY_HOST="artifactory.landcareresearch.co.nz"
+          fi
+          
+          echo "app_name=${APP_NAME}" >> $GITHUB_OUTPUT
+          echo "artifactory_host=${ARTIFACTORY_HOST}" >> $GITHUB_OUTPUT
+          echo "image_registry=${ARTIFACTORY_HOST}/docker/${{ inputs.image_namespace }}/${APP_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Fetch build metadata
+        id: metadata
+        run: |
+          APP_NAME="${{ steps.vars.outputs.app_name }}"
+          BUILD_ID="${{ inputs.build_id }}"
+          ARTIFACTORY_HOST="${{ steps.vars.outputs.artifactory_host }}"
+          
+          METADATA_URL="https://${ARTIFACTORY_HOST}/artifactory/docker-build-metadata/${APP_NAME}/builds/${BUILD_ID}/index.json"
+          
+          echo "Fetching build metadata from: ${METADATA_URL}"
+          
+          if ! curl -fsSL \
+            -H "Authorization: Bearer ${{ secrets.ARTIFACTORY_TOKEN }}" \
+            "${METADATA_URL}" > build-index.json; then
+            echo "::error::Failed to fetch build metadata from ${METADATA_URL}"
+            exit 1
+          fi
+          
+          echo "Build index contents:"
+          cat build-index.json
+          
+          # Get list of targets
+          TARGETS=$(jq -r '.outputs[].target' build-index.json | tr '\n' ' ')
+          echo "Available targets: ${TARGETS}"
+          echo "targets=${TARGETS}" >> $GITHUB_OUTPUT
+
+      - name: Clone GitOps repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.gitops_repo }}
+          ref: ${{ inputs.gitops_branch }}
+          ssh-key: ${{ secrets.GITOPS_SSH_KEY }}
+          path: gitops
+
+      - name: Install yq
+        uses: mikefarah/yq@v4
+
+      - name: Update manifests
+        id: update
+        run: |
+          cd gitops
+          
+          APP_NAME="${{ steps.vars.outputs.app_name }}"
+          ENV="${{ inputs.environment }}"
+          CLUSTER="${{ inputs.cluster }}"
+          IMAGE_REGISTRY="${{ steps.vars.outputs.image_registry }}"
+          BUILD_ID="${{ inputs.build_id }}"
+          CONTAINER_NAME="${{ inputs.container_name }}"
+          CUSTOM_PATH="${{ inputs.manifest_path_pattern }}"
+          
+          # Determine which components to deploy
+          if [[ -n "${{ inputs.components }}" ]]; then
+            IFS=',' read -ra TARGETS <<< "${{ inputs.components }}"
+          else
+            readarray -t TARGETS < <(jq -r '.outputs[].target' ../build-index.json)
+          fi
+          
+          echo "Deploying components: ${TARGETS[*]}"
+          
+          UPDATED_COUNT=0
+          UPDATED_LIST=""
+          
+          for target in "${TARGETS[@]}"; do
+            # Get digest for this target
+            DIGEST=$(jq -r --arg t "$target" '.outputs[] | select(.target == $t) | .digest' ../build-index.json)
+            
+            if [[ -z "$DIGEST" || "$DIGEST" == "null" ]]; then
+              echo "::warning::No digest found for target: $target"
+              continue
+            fi
+            
+            # Determine manifest path
+            if [[ -n "$CUSTOM_PATH" ]]; then
+              COMPONENT="$target" MANIFEST_PATH=$(envsubst <<< "$CUSTOM_PATH")
+            else
+              MANIFEST_PATH="clusters/${CLUSTER}/applications/${APP_NAME}/${ENV}/${target}/deployment.yaml"
+            fi
+            
+            if [[ ! -f "$MANIFEST_PATH" ]]; then
+              echo "::warning::Manifest not found: $MANIFEST_PATH"
+              continue
+            fi
+            
+            # Build image reference with digest
+            IMAGE_REF="${IMAGE_REGISTRY}/${target}:${BUILD_ID}@${DIGEST}"
+            
+            echo "Updating ${MANIFEST_PATH}"
+            echo "  → Image: ${IMAGE_REF}"
+            
+            # Update image in deployment
+            if [[ -n "$CONTAINER_NAME" ]]; then
+              yq eval -i "
+                (select(.kind == \"Deployment\" or .kind == \"StatefulSet\" or .kind == \"DaemonSet\") |
+                  .spec.template.spec.containers[] | select(.name == \"${CONTAINER_NAME}\")).image = \"${IMAGE_REF}\"
+              " "$MANIFEST_PATH"
+            else
+              yq eval -i "
+                (select(.kind == \"Deployment\" or .kind == \"StatefulSet\" or .kind == \"DaemonSet\") |
+                  .spec.template.spec.containers[0]).image = \"${IMAGE_REF}\"
+              " "$MANIFEST_PATH"
+            fi
+            
+            git add "$MANIFEST_PATH"
+            ((UPDATED_COUNT++))
+            UPDATED_LIST="${UPDATED_LIST}${target}, "
+          done
+          
+          if [[ $UPDATED_COUNT -eq 0 ]]; then
+            echo "::error::No manifests were updated"
+            exit 1
+          fi
+          
+          # Trim trailing comma
+          UPDATED_LIST="${UPDATED_LIST%, }"
+          
+          echo "updated_count=${UPDATED_COUNT}" >> $GITHUB_OUTPUT
+          echo "updated_list=${UPDATED_LIST}" >> $GITHUB_OUTPUT
+
+      - name: Commit and push
+        id: commit
+        run: |
+          cd gitops
+          
+          APP_NAME="${{ steps.vars.outputs.app_name }}"
+          ENV="${{ inputs.environment }}"
+          BUILD_ID="${{ inputs.build_id }}"
+          PREFIX="${{ inputs.commit_message_prefix }}"
+          
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          
+          # Check if there are changes to commit
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            echo "committed=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          COMMIT_MSG="${PREFIX}(${APP_NAME}): deploy ${BUILD_ID} to ${ENV}
+
+          Components: ${{ steps.update.outputs.updated_list }}
+          Source: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          Triggered by: ${{ github.actor }}"
+          
+          git commit -m "$COMMIT_MSG"
+          
+          # Retry push in case of concurrent updates
+          for i in 1 2 3; do
+            if git push; then
+              echo "committed=true" >> $GITHUB_OUTPUT
+              echo "commit_sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "Push failed, retrying (attempt $i/3)..."
+            git pull --rebase
+            sleep 2
+          done
+          
+          echo "::error::Failed to push after 3 attempts"
+          exit 1
+
+      - name: Tag images in Artifactory
+        if: steps.commit.outputs.committed == 'true'
+        run: |
+          APP_NAME="${{ steps.vars.outputs.app_name }}"
+          ENV="${{ inputs.environment }}"
+          BUILD_ID="${{ inputs.build_id }}"
+          ARTIFACTORY_HOST="${{ steps.vars.outputs.artifactory_host }}"
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          
+          echo "Tagging deployed images with environment: ${ENV}"
+          
+          for target in $(jq -r '.outputs[].target' build-index.json); do
+            REPO_PATH="${{ inputs.image_namespace }}/${APP_NAME}/${target}"
+            
+            # Add sliding environment tag
+            echo "  Tagging ${target}:${BUILD_ID} → ${target}:${ENV}"
+            
+            curl -fsSL -X POST \
+              -H "Authorization: Bearer ${{ secrets.ARTIFACTORY_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              "https://${ARTIFACTORY_HOST}/artifactory/api/docker/docker/v2/promote" \
+              -d "{
+                \"targetRepo\": \"docker\",
+                \"dockerRepository\": \"${REPO_PATH}\",
+                \"tag\": \"${BUILD_ID}\",
+                \"targetTag\": \"${ENV}\"
+              }" || echo "::warning::Failed to add sliding tag for ${target}"
+          done
+
+      - name: Summary
+        run: |
+          echo "## Deploy Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Application | \`${{ steps.vars.outputs.app_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | \`${{ inputs.environment }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cluster | \`${{ inputs.cluster }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build ID | \`${{ inputs.build_id }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Components | ${{ steps.update.outputs.updated_list }} |" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ steps.commit.outputs.committed }}" == "true" ]]; then
+            echo "| GitOps Commit | \`${{ steps.commit.outputs.commit_sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "ArgoCD will automatically sync the changes to the cluster." >> $GITHUB_STEP_SUMMARY
