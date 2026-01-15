@@ -1,0 +1,199 @@
+# Reusable Kubernetes Deploy Workflow - PR-Based Promotion
+#
+# Generates promotion information for creating PRs to the GitOps repository.
+# This is the SECURE approach - no direct write access to GitOps repo needed.
+#
+# For automatic dev deployments, use ArgoCD Image Updater instead.
+# This workflow is intended for controlled promotions (test, prod).
+
+name: K8s Promote (Info)
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Target environment (dev, test, prod)'
+        type: string
+        required: true
+      cluster:
+        description: 'Target cluster name'
+        type: string
+        default: tak-k8s-nonprod
+      build_id:
+        description: 'Build identifier from docker-build workflow'
+        type: string
+        required: true
+      app_name:
+        description: 'Application name (defaults to repository name)'
+        type: string
+        default: ''
+      components:
+        description: 'Comma-separated components to deploy (empty = all from build index)'
+        type: string
+        default: ''
+      image_namespace:
+        description: 'Image namespace in registry'
+        type: string
+        default: mwlr-private
+    secrets:
+      ARTIFACTORY_HOST:
+        required: false
+        description: 'Artifactory hostname (defaults to artifactory.landcareresearch.co.nz)'
+      ARTIFACTORY_TOKEN:
+        required: true
+        description: 'Artifactory token for fetching build metadata'
+    outputs:
+      promotion_info:
+        description: 'JSON with promotion details for creating PR manually or via other automation'
+        value: ${{ jobs.prepare-promotion.outputs.promotion_info }}
+
+jobs:
+  prepare-promotion:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      promotion_info: ${{ steps.output.outputs.promotion_info }}
+
+    steps:
+      - name: Set variables
+        id: vars
+        run: |
+          APP_NAME="${{ inputs.app_name }}"
+          if [[ -z "$APP_NAME" ]]; then
+            APP_NAME="${{ github.event.repository.name }}"
+          fi
+          
+          ARTIFACTORY_HOST="${{ secrets.ARTIFACTORY_HOST }}"
+          if [[ -z "$ARTIFACTORY_HOST" ]]; then
+            ARTIFACTORY_HOST="artifactory.landcareresearch.co.nz"
+          fi
+          
+          echo "app_name=${APP_NAME}" >> $GITHUB_OUTPUT
+          echo "artifactory_host=${ARTIFACTORY_HOST}" >> $GITHUB_OUTPUT
+          echo "image_registry=${ARTIFACTORY_HOST}/docker/${{ inputs.image_namespace }}/${APP_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Fetch build metadata
+        id: metadata
+        run: |
+          APP_NAME="${{ steps.vars.outputs.app_name }}"
+          BUILD_ID="${{ inputs.build_id }}"
+          ARTIFACTORY_HOST="${{ steps.vars.outputs.artifactory_host }}"
+          
+          METADATA_URL="https://${ARTIFACTORY_HOST}/artifactory/docker-build-metadata/${APP_NAME}/builds/${BUILD_ID}/index.json"
+          
+          echo "Fetching build metadata from: ${METADATA_URL}"
+          
+          if ! curl -fsSL \
+            -H "Authorization: Bearer ${{ secrets.ARTIFACTORY_TOKEN }}" \
+            "${METADATA_URL}" > build-index.json; then
+            echo "::error::Failed to fetch build metadata from ${METADATA_URL}"
+            exit 1
+          fi
+          
+          echo "Build index contents:"
+          cat build-index.json
+
+      - name: Generate promotion manifest
+        id: output
+        run: |
+          APP_NAME="${{ steps.vars.outputs.app_name }}"
+          ENV="${{ inputs.environment }}"
+          CLUSTER="${{ inputs.cluster }}"
+          IMAGE_REGISTRY="${{ steps.vars.outputs.image_registry }}"
+          BUILD_ID="${{ inputs.build_id }}"
+          
+          # Determine which components to deploy
+          if [[ -n "${{ inputs.components }}" ]]; then
+            COMPONENTS="${{ inputs.components }}"
+          else
+            COMPONENTS=$(jq -r '.outputs[].target' build-index.json | tr '\n' ',' | sed 's/,$//')
+          fi
+          
+          # Build promotion info JSON
+          PROMOTION_INFO=$(jq -n \
+            --arg app "$APP_NAME" \
+            --arg env "$ENV" \
+            --arg cluster "$CLUSTER" \
+            --arg build_id "$BUILD_ID" \
+            --arg registry "$IMAGE_REGISTRY" \
+            --arg components "$COMPONENTS" \
+            --arg source_repo "${{ github.repository }}" \
+            --arg source_sha "${{ github.sha }}" \
+            --arg source_run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --slurpfile index build-index.json \
+            '{
+              app: $app,
+              environment: $env,
+              cluster: $cluster,
+              build_id: $build_id,
+              registry: $registry,
+              components: ($components | split(",")),
+              source: {
+                repository: $source_repo,
+                sha: $source_sha,
+                run_url: $source_run
+              },
+              images: [
+                $index[0].outputs[] | {
+                  component: .target,
+                  tag: $build_id,
+                  digest: .digest,
+                  full_ref: "\($registry)/\(.target):\($build_id)@\(.digest)"
+                }
+              ]
+            }')
+          
+          echo "Promotion info:"
+          echo "$PROMOTION_INFO" | jq .
+          
+          # Output as single line for GitHub Actions
+          echo "promotion_info=$(echo "$PROMOTION_INFO" | jq -c .)" >> $GITHUB_OUTPUT
+
+      - name: Upload promotion artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: promotion-${{ inputs.environment }}-${{ inputs.build_id }}
+          path: build-index.json
+          retention-days: 90
+
+      - name: Summary
+        run: |
+          APP_NAME="${{ steps.vars.outputs.app_name }}"
+          ENV="${{ inputs.environment }}"
+          CLUSTER="${{ inputs.cluster }}"
+          BUILD_ID="${{ inputs.build_id }}"
+          IMAGE_REGISTRY="${{ steps.vars.outputs.image_registry }}"
+          
+          cat << EOF >> $GITHUB_STEP_SUMMARY
+          ## 🚀 Promotion Ready: ${APP_NAME} → ${ENV}
+          
+          | Property | Value |
+          |----------|-------|
+          | Application | \`${APP_NAME}\` |
+          | Environment | \`${ENV}\` |
+          | Cluster | \`${CLUSTER}\` |
+          | Build ID | \`${BUILD_ID}\` |
+          
+          ### Images to Deploy
+          
+          | Component | Image Reference |
+          |-----------|-----------------|
+          EOF
+          
+          jq -r --arg registry "$IMAGE_REGISTRY" --arg build_id "$BUILD_ID" \
+            '.outputs[] | "| \(.target) | `\($registry)/\(.target):\($build_id)@\(.digest)` |"' \
+            build-index.json >> $GITHUB_STEP_SUMMARY
+          
+          cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+          
+          ### Next Steps
+          
+          **For dev environment:** ArgoCD Image Updater handles this automatically.
+          
+          **For test/prod environments:**
+          1. Clone `k8s-apps-config` repository
+          2. Update deployment manifests with the image references above
+          3. Create a Pull Request for review
+          4. After approval and merge, ArgoCD will sync the changes
+          
+          EOF

@@ -1,8 +1,11 @@
 # Example: Complete CI/CD workflow for a consumer repository
 #
-# Copy this to your repository as .github/workflows/ci.yml and adjust as needed.
-# This example shows building on push to main and deploying to dev automatically,
-# with manual promotion to prod.
+# Security Model:
+# - CI builds and pushes images to Artifactory (no GitOps access)
+# - ArgoCD Image Updater automatically deploys to dev
+# - Prod requires manual PR to k8s-apps-config (human approval)
+#
+# This workflow has NO write access to the GitOps repository.
 
 name: CI/CD
 
@@ -11,17 +14,6 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  workflow_dispatch:
-    inputs:
-      deploy_env:
-        description: 'Environment to deploy to'
-        required: true
-        default: 'dev'
-        type: choice
-        options:
-          - dev
-          - test
-          - prod
 
 jobs:
   # Build and push Docker images
@@ -37,28 +29,31 @@ jobs:
       ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
       ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
 
-  # Auto-deploy to dev on push to main
-  deploy-dev:
+  # Summary job - dev deployment happens automatically via Image Updater
+  summary:
     needs: build
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    uses: manaakiwhenua/github-workflows/.github/workflows/k8s-deploy.yml@main
-    with:
-      environment: dev
-      cluster: tak-k8s-nonprod
-      build_id: ${{ needs.build.outputs.build_id }}
-    secrets:
-      ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
-      GITOPS_SSH_KEY: ${{ secrets.GITOPS_SSH_KEY }}
-
-  # Manual deployment via workflow_dispatch
-  deploy-manual:
-    needs: build
-    if: github.event_name == 'workflow_dispatch'
-    uses: manaakiwhenua/github-workflows/.github/workflows/k8s-deploy.yml@main
-    with:
-      environment: ${{ inputs.deploy_env }}
-      cluster: ${{ inputs.deploy_env == 'prod' && 'tak-k8s-prod' || 'tak-k8s-nonprod' }}
-      build_id: ${{ needs.build.outputs.build_id }}
-    secrets:
-      ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
-      GITOPS_SSH_KEY: ${{ secrets.GITOPS_SSH_KEY }}
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deployment summary
+        run: |
+          cat << SUMMARY >> $GITHUB_STEP_SUMMARY
+          ## ✅ Build Complete
+          
+          | Property | Value |
+          |----------|-------|
+          | Build ID | \`${{ needs.build.outputs.build_id }}\` |
+          | Registry | \`${{ needs.build.outputs.registry_prefix }}\` |
+          
+          ### 🔄 Dev Deployment
+          
+          ArgoCD Image Updater will automatically detect the new images and deploy to dev.
+          
+          ### 🚀 Prod Promotion
+          
+          To promote to production:
+          1. Clone k8s-apps-config
+          2. Update prod manifests with build ID: \`${{ needs.build.outputs.build_id }}\`
+          3. Create a Pull Request
+          4. Get approval and merge
+          SUMMARY

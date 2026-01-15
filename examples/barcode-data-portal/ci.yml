@@ -1,6 +1,14 @@
-# Example CI/CD workflow for barcode-data-portal-mwlr
+# CI/CD workflow for barcode-data-portal-mwlr
 #
-# Place this at .github/workflows/ci.yml in the barcode-data-portal-mwlr repository
+# Security Model:
+# - CI builds and pushes images to Artifactory
+# - ArgoCD Image Updater automatically deploys to dev
+# - NO GitOps repo access from CI
+#
+# Required secrets:
+# - ARTIFACTORY_HOST
+# - ARTIFACTORY_USERNAME  
+# - ARTIFACTORY_TOKEN
 
 name: CI/CD
 
@@ -22,14 +30,25 @@ jobs:
       ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
       ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
 
-  deploy-dev:
+  summary:
     needs: build
     if: github.ref == 'refs/heads/main'
-    uses: manaakiwhenua/github-workflows/.github/workflows/k8s-deploy.yml@main
-    with:
-      environment: dev
-      cluster: tak-k8s-nonprod
-      build_id: ${{ needs.build.outputs.build_id }}
-    secrets:
-      ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
-      GITOPS_SSH_KEY: ${{ secrets.GITOPS_SSH_KEY }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deployment summary
+        run: |
+          cat << SUMMARY >> $GITHUB_STEP_SUMMARY
+          ## ✅ Build Complete
+          
+          | Property | Value |
+          |----------|-------|
+          | Build ID | \`${{ needs.build.outputs.build_id }}\` |
+          
+          ### Dev Deployment
+          
+          🔄 ArgoCD Image Updater will automatically deploy to dev.
+          
+          ### Prod Promotion
+          
+          Create a PR in k8s-apps-config with build ID: \`${{ needs.build.outputs.build_id }}\`
+          SUMMARY

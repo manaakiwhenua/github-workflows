@@ -51,8 +51,8 @@ jobs:
           yq eval '.on.workflow_call.outputs.build_id' .github/workflows/docker-build.yml
           yq eval '.on.workflow_call.outputs.metadata_url' .github/workflows/docker-build.yml
           
-          echo "Checking k8s-deploy.yml..."
-          yq eval '.on.workflow_call.inputs.environment' .github/workflows/k8s-deploy.yml
-          yq eval '.on.workflow_call.inputs.build_id' .github/workflows/k8s-deploy.yml
+          echo "Checking k8s-promote.yml..."
+          yq eval '.on.workflow_call.inputs.environment' .github/workflows/k8s-promote.yml
+          yq eval '.on.workflow_call.inputs.build_id' .github/workflows/k8s-promote.yml
           
           echo "✓ All required fields present"
