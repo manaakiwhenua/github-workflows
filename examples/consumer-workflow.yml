@@ -1,11 +1,14 @@
 # Example: Complete CI/CD workflow for a consumer repository
 #
 # Security Model:
-# - CI builds and pushes images to Artifactory (no GitOps access)
-# - ArgoCD Image Updater automatically deploys to dev
-# - Prod requires manual PR to k8s-apps-config (human approval)
+# - CI builds and pushes images to Artifactory
+# - Deploy step triggers k8s-apps-config pipeline (no direct GitOps write access)
+# - k8s-apps-config validates request and commits/creates PR
+# - Nonprod: direct commit to main
+# - Prod: creates PR requiring approval
 #
 # This workflow has NO write access to the GitOps repository.
+# It only has permission to trigger pipelines in k8s-apps-config.
 
 name: CI/CD
 
@@ -29,31 +32,68 @@ jobs:
       ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
       ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
 
-  # Summary job - dev deployment happens automatically via Image Updater
-  summary:
+  # Deploy to dev (automatic)
+  deploy-dev:
     needs: build
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - name: Deployment summary
+      - name: Deploy to dev
+        uses: manaakiwhenua/github-workflows/actions/k8s-deploy@main
+        with:
+          app_name: ${{ github.event.repository.name }}
+          environment: dev
+          cluster: tak-k8s-nonprod
+          build_key: ${{ needs.build.outputs.build_id }}
+          bitbucket_token: ${{ secrets.K8S_APPS_CONFIG_TRIGGER_TOKEN }}
+
+  # Deploy to test (manual)
+  deploy-test:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: test  # Requires manual approval in GitHub
+    steps:
+      - name: Deploy to test
+        uses: manaakiwhenua/github-workflows/actions/k8s-deploy@main
+        with:
+          app_name: ${{ github.event.repository.name }}
+          environment: test
+          cluster: tak-k8s-nonprod
+          build_key: ${{ needs.build.outputs.build_id }}
+          bitbucket_token: ${{ secrets.K8S_APPS_CONFIG_TRIGGER_TOKEN }}
+
+  # Deploy to prod (manual + creates PR in k8s-apps-config)
+  deploy-prod:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production  # Requires manual approval in GitHub
+    steps:
+      - name: Deploy to prod
+        id: deploy
+        uses: manaakiwhenua/github-workflows/actions/k8s-deploy@main
+        with:
+          app_name: ${{ github.event.repository.name }}
+          environment: prod
+          cluster: tak-k8s-prod
+          build_key: ${{ needs.build.outputs.build_id }}
+          bitbucket_token: ${{ secrets.K8S_APPS_CONFIG_TRIGGER_TOKEN }}
+          wait: 'false'  # Don't wait - PR needs human approval
+      
+      - name: Summary
         run: |
           cat << SUMMARY >> $GITHUB_STEP_SUMMARY
-          ## ✅ Build Complete
+          ## 🚀 Production Deployment Initiated
+          
+          A Pull Request has been created in k8s-apps-config.
+          
+          **Next steps:**
+          1. Review the PR in Bitbucket
+          2. Approve and merge to deploy to production
           
           | Property | Value |
           |----------|-------|
-          | Build ID | \`${{ needs.build.outputs.build_id }}\` |
-          | Registry | \`${{ needs.build.outputs.registry_prefix }}\` |
-          
-          ### 🔄 Dev Deployment
-          
-          ArgoCD Image Updater will automatically detect the new images and deploy to dev.
-          
-          ### 🚀 Prod Promotion
-          
-          To promote to production:
-          1. Clone k8s-apps-config
-          2. Update prod manifests with build ID: \`${{ needs.build.outputs.build_id }}\`
-          3. Create a Pull Request
-          4. Get approval and merge
+          | Pipeline | [${{ steps.deploy.outputs.pipeline_uuid }}](${{ steps.deploy.outputs.pipeline_url }}) |
+          | Image Tag | \`${{ needs.build.outputs.build_id }}\` |
           SUMMARY

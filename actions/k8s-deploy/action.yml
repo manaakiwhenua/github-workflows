@@ -1,0 +1,132 @@
+name: 'K8s Deploy'
+description: 'Trigger k8s-apps-config deployment pipeline to update Kubernetes manifests'
+
+inputs:
+  app_name:
+    description: 'Application name (must match folder in k8s-apps-config)'
+    required: true
+  environment:
+    description: 'Target environment (dev, test, prod)'
+    required: true
+  cluster:
+    description: 'Target cluster (tak-k8s-nonprod, tak-k8s-platform, tak-k8s-prod)'
+    required: true
+  build_key:
+    description: 'Build key / image tag (e.g., 249-abc123). Used to look up build metadata from Artifactory.'
+    required: true
+  bitbucket_token:
+    description: 'Bitbucket access token with pipelines:write scope for k8s-apps-config'
+    required: true
+  wait:
+    description: 'Wait for pipeline to complete'
+    required: false
+    default: 'true'
+  timeout:
+    description: 'Timeout in seconds when waiting for pipeline'
+    required: false
+    default: '300'
+
+outputs:
+  pipeline_uuid:
+    description: 'UUID of the triggered pipeline'
+    value: ${{ steps.trigger.outputs.pipeline_uuid }}
+  pipeline_url:
+    description: 'URL to the triggered pipeline'
+    value: ${{ steps.trigger.outputs.pipeline_url }}
+  pr_url:
+    description: 'URL to the PR if one was created (prod deployments)'
+    value: ${{ steps.wait.outputs.pr_url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Trigger k8s-apps-config pipeline
+      id: trigger
+      shell: bash
+      run: |
+        echo "::group::Triggering k8s-apps-config pipeline"
+        
+        RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+          -H "Authorization: Bearer ${{ inputs.bitbucket_token }}" \
+          -H "Content-Type: application/json" \
+          "https://api.bitbucket.org/2.0/repositories/mwlr/k8s-apps-config/pipelines/" \
+          -d '{
+            "target": {
+              "ref_type": "branch",
+              "ref_name": "main",
+              "type": "pipeline_ref_target",
+              "selector": {
+                "type": "custom",
+                "pattern": "update-app-manifest"
+              }
+            },
+            "variables": [
+              { "key": "APP_NAME", "value": "${{ inputs.app_name }}" },
+              { "key": "ENVIRONMENT", "value": "${{ inputs.environment }}" },
+              { "key": "CLUSTER", "value": "${{ inputs.cluster }}" },
+              { "key": "BUILD_KEY", "value": "${{ inputs.build_key }}" }
+            ]
+          }')
+        
+        HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+        BODY=$(echo "$RESPONSE" | sed '$d')
+        
+        if [[ "$HTTP_CODE" != "201" ]]; then
+          echo "::error::Failed to trigger pipeline (HTTP $HTTP_CODE): $BODY"
+          exit 1
+        fi
+        
+        PIPELINE_UUID=$(echo "$BODY" | jq -r '.uuid')
+        PIPELINE_URL="https://bitbucket.org/mwlr/k8s-apps-config/pipelines/results/${PIPELINE_UUID}"
+        
+        echo "pipeline_uuid=$PIPELINE_UUID" >> $GITHUB_OUTPUT
+        echo "pipeline_url=$PIPELINE_URL" >> $GITHUB_OUTPUT
+        
+        echo "✅ Pipeline triggered: $PIPELINE_URL"
+        echo "::endgroup::"
+
+    - name: Wait for pipeline completion
+      id: wait
+      if: inputs.wait == 'true'
+      shell: bash
+      run: |
+        echo "::group::Waiting for pipeline completion"
+        
+        PIPELINE_UUID="${{ steps.trigger.outputs.pipeline_uuid }}"
+        TIMEOUT=${{ inputs.timeout }}
+        ELAPSED=0
+        POLL_INTERVAL=10
+        
+        while [[ $ELAPSED -lt $TIMEOUT ]]; do
+          RESPONSE=$(curl -s \
+            -H "Authorization: Bearer ${{ inputs.bitbucket_token }}" \
+            "https://api.bitbucket.org/2.0/repositories/mwlr/k8s-apps-config/pipelines/${PIPELINE_UUID}")
+          
+          STATE=$(echo "$RESPONSE" | jq -r '.state.name')
+          RESULT=$(echo "$RESPONSE" | jq -r '.state.result.name // empty')
+          
+          echo "Pipeline state: $STATE ${RESULT:+($RESULT)} [${ELAPSED}s/${TIMEOUT}s]"
+          
+          case "$STATE" in
+            COMPLETED)
+              if [[ "$RESULT" == "SUCCESSFUL" ]]; then
+                echo "✅ Pipeline completed successfully"
+                echo "::endgroup::"
+                exit 0
+              else
+                echo "::error::Pipeline failed with result: $RESULT"
+                exit 1
+              fi
+              ;;
+            FAILED|ERROR)
+              echo "::error::Pipeline failed: $STATE"
+              exit 1
+              ;;
+          esac
+          
+          sleep $POLL_INTERVAL
+          ELAPSED=$((ELAPSED + POLL_INTERVAL))
+        done
+        
+        echo "::error::Timeout waiting for pipeline after ${TIMEOUT}s"
+        exit 1
