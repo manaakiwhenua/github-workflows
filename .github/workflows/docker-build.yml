@@ -94,23 +94,72 @@ jobs:
           echo "GIT_REVISION=${GITHUB_SHA}" >> $GITHUB_ENV
 
       - name: Install registry CA certificate
+        id: ca-cert
         env:
           REGISTRY_CA_CERT: ${{ secrets.REGISTRY_CA_CERT }}
+          REGISTRY_HOST: ${{ inputs.registry_host }}
         run: |
           if [[ -z "$REGISTRY_CA_CERT" ]]; then
             echo "No CA certificate provided, skipping"
+            echo "has_ca_cert=false" >> $GITHUB_OUTPUT
             exit 0
           fi
           
+          echo "has_ca_cert=true" >> $GITHUB_OUTPUT
+          
           # Add CA to system trust store
-          echo "$REGISTRY_CA_CERT" | sudo tee /usr/local/share/ca-certificates/registry-ca.crt
+          echo "$REGISTRY_CA_CERT" | sudo tee /usr/local/share/ca-certificates/registry-ca.crt > /dev/null
           sudo update-ca-certificates
           
-          # Add CA to Docker daemon for registry access
-          sudo mkdir -p /etc/docker/certs.d/${{ inputs.registry_host }}
-          echo "$REGISTRY_CA_CERT" | sudo tee /etc/docker/certs.d/${{ inputs.registry_host }}/ca.crt
+          # Add CA to Docker daemon cert store for registry access
+          # This is used by docker login and docker pull/push
+          sudo mkdir -p "/etc/docker/certs.d/${REGISTRY_HOST}"
+          echo "$REGISTRY_CA_CERT" | sudo tee "/etc/docker/certs.d/${REGISTRY_HOST}/ca.crt" > /dev/null
+          
+          echo "✓ CA certificate installed for ${REGISTRY_HOST}"
 
-      - name: Set up Docker Buildx
+      # BuildKit in docker-container driver runs in an isolated container.
+      # We configure it to trust the registry by providing the buildkitd config
+      # that references certs from the host mounted via buildkitd-flags.
+      - name: Set up Docker Buildx (with CA)
+        if: steps.ca-cert.outputs.has_ca_cert == 'true'
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+          buildkitd-config-inline: |
+            [registry."${{ inputs.registry_host }}"]
+              insecure = false
+              ca = ["/etc/docker-certs/ca.crt"]
+          driver-opts: |
+            image=moby/buildkit:buildx-stable-1
+
+      - name: Configure BuildKit CA certificate
+        if: steps.ca-cert.outputs.has_ca_cert == 'true'
+        env:
+          REGISTRY_HOST: ${{ inputs.registry_host }}
+        run: |
+          # Get the BuildKit container name
+          BUILDKIT_CONTAINER=$(docker ps --filter "name=buildx_buildkit" --format "{{.Names}}" | head -1)
+          
+          if [[ -z "$BUILDKIT_CONTAINER" ]]; then
+            echo "ERROR: BuildKit container not found"
+            exit 1
+          fi
+          
+          echo "Found BuildKit container: ${BUILDKIT_CONTAINER}"
+          
+          # Create the certs directory inside the BuildKit container
+          docker exec "$BUILDKIT_CONTAINER" mkdir -p /etc/docker-certs
+          
+          # Copy the CA certificate into the BuildKit container
+          docker cp "/etc/docker/certs.d/${REGISTRY_HOST}/ca.crt" "${BUILDKIT_CONTAINER}:/etc/docker-certs/ca.crt"
+          
+          # Restart the BuildKit daemon to pick up the config
+          # Note: buildkitd will re-read config on the next build
+          echo "✓ CA certificate copied to BuildKit container"
+
+      - name: Set up Docker Buildx (without CA)
+        if: steps.ca-cert.outputs.has_ca_cert != 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Login to Artifactory
