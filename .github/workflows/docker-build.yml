@@ -116,51 +116,50 @@ jobs:
           sudo mkdir -p "/etc/docker/certs.d/${REGISTRY_HOST}"
           echo "$REGISTRY_CA_CERT" | sudo tee "/etc/docker/certs.d/${REGISTRY_HOST}/ca.crt" > /dev/null
           
+          # Store the cert for later injection into BuildKit
+          echo "$REGISTRY_CA_CERT" > /tmp/registry-ca.crt
+          
           echo "✓ CA certificate installed for ${REGISTRY_HOST}"
 
       # BuildKit in docker-container driver runs in an isolated container.
-      # We configure it to trust the registry by providing the buildkitd config
-      # that references certs from the host mounted via buildkitd-flags.
-      - name: Set up Docker Buildx (with CA)
-        if: steps.ca-cert.outputs.has_ca_cert == 'true'
+      # We set up the builder first, then inject the CA cert into the container.
+      - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
           driver: docker-container
-          buildkitd-config-inline: |
-            [registry."${{ inputs.registry_host }}"]
-              insecure = false
-              ca = ["/etc/docker-certs/ca.crt"]
           driver-opts: |
             image=moby/buildkit:buildx-stable-1
+            network=host
 
+      # Inject CA cert into BuildKit container's trust store
       - name: Configure BuildKit CA certificate
         if: steps.ca-cert.outputs.has_ca_cert == 'true'
-        env:
-          REGISTRY_HOST: ${{ inputs.registry_host }}
         run: |
           # Get the BuildKit container name
           BUILDKIT_CONTAINER=$(docker ps --filter "name=buildx_buildkit" --format "{{.Names}}" | head -1)
           
           if [[ -z "$BUILDKIT_CONTAINER" ]]; then
             echo "ERROR: BuildKit container not found"
+            docker ps -a
             exit 1
           fi
           
           echo "Found BuildKit container: ${BUILDKIT_CONTAINER}"
           
-          # Create the certs directory inside the BuildKit container
-          docker exec "$BUILDKIT_CONTAINER" mkdir -p /etc/docker-certs
-          
           # Copy the CA certificate into the BuildKit container
-          docker cp "/etc/docker/certs.d/${REGISTRY_HOST}/ca.crt" "${BUILDKIT_CONTAINER}:/etc/docker-certs/ca.crt"
+          docker cp /tmp/registry-ca.crt "${BUILDKIT_CONTAINER}:/usr/local/share/ca-certificates/registry-ca.crt"
           
-          # Restart the BuildKit daemon to pick up the config
-          # Note: buildkitd will re-read config on the next build
-          echo "✓ CA certificate copied to BuildKit container"
-
-      - name: Set up Docker Buildx (without CA)
-        if: steps.ca-cert.outputs.has_ca_cert != 'true'
-        uses: docker/setup-buildx-action@v3
+          # Update CA certificates inside the BuildKit container
+          docker exec "$BUILDKIT_CONTAINER" update-ca-certificates 2>/dev/null || \
+            docker exec "$BUILDKIT_CONTAINER" cat /usr/local/share/ca-certificates/registry-ca.crt >> /etc/ssl/certs/ca-certificates.crt
+          
+          # Restart buildkitd to pick up the new CA bundle
+          docker restart "$BUILDKIT_CONTAINER"
+          
+          # Wait for buildkitd to be ready
+          sleep 3
+          
+          echo "✓ CA certificate configured in BuildKit container"
 
       - name: Login to Artifactory
         uses: docker/login-action@v3
