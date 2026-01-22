@@ -146,18 +146,16 @@ jobs:
           
           echo "Found BuildKit container: ${BUILDKIT_CONTAINER}"
           
-          # Copy the CA certificate into the BuildKit container
-          docker cp /tmp/registry-ca.crt "${BUILDKIT_CONTAINER}:/usr/local/share/ca-certificates/registry-ca.crt"
-          
-          # Update CA certificates inside the BuildKit container
-          docker exec "$BUILDKIT_CONTAINER" update-ca-certificates 2>/dev/null || \
-            docker exec "$BUILDKIT_CONTAINER" cat /usr/local/share/ca-certificates/registry-ca.crt >> /etc/ssl/certs/ca-certificates.crt
+          # Append the CA certificate directly to the CA bundle inside the container
+          # BuildKit uses Alpine which has certs at /etc/ssl/certs/ca-certificates.crt
+          docker cp /tmp/registry-ca.crt "${BUILDKIT_CONTAINER}:/tmp/registry-ca.crt"
+          docker exec "$BUILDKIT_CONTAINER" sh -c 'cat /tmp/registry-ca.crt >> /etc/ssl/certs/ca-certificates.crt'
           
           # Restart buildkitd to pick up the new CA bundle
           docker restart "$BUILDKIT_CONTAINER"
           
           # Wait for buildkitd to be ready
-          sleep 3
+          sleep 5
           
           echo "✓ CA certificate configured in BuildKit container"
 
