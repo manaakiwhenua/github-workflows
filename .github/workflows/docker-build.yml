@@ -94,15 +94,21 @@ jobs:
           echo "GIT_REVISION=${GITHUB_SHA}" >> $GITHUB_ENV
 
       - name: Install registry CA certificate
-        if: ${{ secrets.REGISTRY_CA_CERT != '' }}
+        env:
+          REGISTRY_CA_CERT: ${{ secrets.REGISTRY_CA_CERT }}
         run: |
+          if [[ -z "$REGISTRY_CA_CERT" ]]; then
+            echo "No CA certificate provided, skipping"
+            exit 0
+          fi
+          
           # Add CA to system trust store
-          echo "${{ secrets.REGISTRY_CA_CERT }}" | sudo tee /usr/local/share/ca-certificates/registry-ca.crt
+          echo "$REGISTRY_CA_CERT" | sudo tee /usr/local/share/ca-certificates/registry-ca.crt
           sudo update-ca-certificates
           
           # Add CA to Docker daemon for registry access
           sudo mkdir -p /etc/docker/certs.d/${{ inputs.registry_host }}
-          echo "${{ secrets.REGISTRY_CA_CERT }}" | sudo tee /etc/docker/certs.d/${{ inputs.registry_host }}/ca.crt
+          echo "$REGISTRY_CA_CERT" | sudo tee /etc/docker/certs.d/${{ inputs.registry_host }}/ca.crt
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
