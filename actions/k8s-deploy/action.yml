@@ -77,9 +77,12 @@ runs:
         fi
         
         PIPELINE_UUID=$(echo "$BODY" | jq -r '.uuid')
+        # URL-encode the curly braces in UUID for API calls
+        PIPELINE_UUID_ENCODED=$(echo "$PIPELINE_UUID" | sed 's/{/%7B/g; s/}/%7D/g')
         PIPELINE_URL="https://bitbucket.org/landcareresearch/k8s-apps-config/pipelines/results/${PIPELINE_UUID}"
         
         echo "pipeline_uuid=$PIPELINE_UUID" >> $GITHUB_OUTPUT
+        echo "pipeline_uuid_encoded=$PIPELINE_UUID_ENCODED" >> $GITHUB_OUTPUT
         echo "pipeline_url=$PIPELINE_URL" >> $GITHUB_OUTPUT
         
         echo "✅ Pipeline triggered: $PIPELINE_URL"
@@ -92,7 +95,8 @@ runs:
       run: |
         echo "::group::Waiting for pipeline completion"
         
-        PIPELINE_UUID="${{ steps.trigger.outputs.pipeline_uuid }}"
+        # Use URL-encoded UUID for API calls
+        PIPELINE_UUID_ENCODED="${{ steps.trigger.outputs.pipeline_uuid_encoded }}"
         TIMEOUT=${{ inputs.timeout }}
         ELAPSED=0
         POLL_INTERVAL=10
@@ -100,7 +104,7 @@ runs:
         while [[ $ELAPSED -lt $TIMEOUT ]]; do
           RESPONSE=$(curl -s \
             -H "Authorization: Bearer ${{ inputs.bitbucket_token }}" \
-            "https://api.bitbucket.org/2.0/repositories/landcareresearch/k8s-apps-config/pipelines/${PIPELINE_UUID}")
+            "https://api.bitbucket.org/2.0/repositories/landcareresearch/k8s-apps-config/pipelines/${PIPELINE_UUID_ENCODED}")
           
           STATE=$(echo "$RESPONSE" | jq -r '.state.name')
           RESULT=$(echo "$RESPONSE" | jq -r '.state.result.name // empty')
