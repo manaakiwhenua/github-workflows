@@ -119,6 +119,17 @@ jobs:
           # Store the cert for later injection into BuildKit
           echo "$REGISTRY_CA_CERT" > /tmp/registry-ca.crt
           
+          # Restart Docker daemon to pick up new certificates
+          sudo systemctl restart docker
+          
+          # Wait for Docker to be ready
+          sleep 5
+          docker info > /dev/null 2>&1
+          
+          # Verify TLS connection works
+          echo "Testing TLS connection to ${REGISTRY_HOST}..."
+          curl -v --cacert /usr/local/share/ca-certificates/registry-ca.crt "https://${REGISTRY_HOST}/v2/" 2>&1 | head -50 || true
+          
           echo "✓ CA certificate installed for ${REGISTRY_HOST}"
 
       # BuildKit in docker-container driver runs in an isolated container.
