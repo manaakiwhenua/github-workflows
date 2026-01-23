@@ -40,5 +40,3 @@ Document any issues that took multiple attempts to resolve here for future refer
      docker restart "$BUILDKIT_CONTAINER"
      ```
   Note: BuildKit uses Alpine Linux, so certs are at `/etc/ssl/certs/ca-certificates.crt`, not `/usr/local/share/ca-certificates/`.
-
-- **Terminal commands with cd**: When running terminal commands, always `cd` to the correct directory as a **separate command** before running other commands. The terminal tool may simplify chained commands and strip the `cd` portion, causing commands to run in the wrong directory.
