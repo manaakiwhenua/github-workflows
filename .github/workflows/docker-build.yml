@@ -234,9 +234,9 @@ jobs:
         id: metadata
         if: inputs.push
         run: |
-          REPO_NAME="${{ steps.vars.outputs.repo_name }}"
+          IMAGE_NAME="${{ steps.vars.outputs.image_name }}"
           BUILD_ID="${{ steps.vars.outputs.build_id }}"
-          METADATA_PATH="docker-build-metadata/${REPO_NAME}/builds/${BUILD_ID}"
+          METADATA_PATH="docker-build-metadata/${IMAGE_NAME}/builds/${BUILD_ID}"
           METADATA_URL="https://${{ inputs.registry_host }}/artifactory/${METADATA_PATH}/index.json"
           
           echo "Uploading build metadata to: ${METADATA_URL}"
