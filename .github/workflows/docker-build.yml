@@ -17,6 +17,10 @@ on:
         description: 'Bake target(s) to build'
         type: string
         default: default
+      image_name:
+        description: 'Image name in registry (defaults to repo name)'
+        type: string
+        default: ''
       platforms:
         description: 'Target platforms (comma-separated)'
         type: string
@@ -80,12 +84,20 @@ jobs:
           # Build ID matches Bitbucket convention: build_number-commit_sha
           BUILD_ID="${{ github.run_number }}-${GITHUB_SHA}"
           REPO_NAME="${{ github.event.repository.name }}"
-          REGISTRY_PREFIX="${{ inputs.registry_host }}/docker/${{ inputs.image_namespace }}/${REPO_NAME}"
+          
+          # Use custom image_name if provided, otherwise default to repo name
+          IMAGE_NAME="${{ inputs.image_name }}"
+          if [[ -z "$IMAGE_NAME" ]]; then
+            IMAGE_NAME="${REPO_NAME}"
+          fi
+          
+          REGISTRY_PREFIX="${{ inputs.registry_host }}/docker/${{ inputs.image_namespace }}/${IMAGE_NAME}"
           
           echo "build_id=${BUILD_ID}" >> $GITHUB_OUTPUT
           echo "image_tag=${BUILD_ID}" >> $GITHUB_OUTPUT
           echo "registry_prefix=${REGISTRY_PREFIX}" >> $GITHUB_OUTPUT
           echo "repo_name=${REPO_NAME}" >> $GITHUB_OUTPUT
+          echo "image_name=${IMAGE_NAME}" >> $GITHUB_OUTPUT
           
           # For bake file interpolation
           echo "REGISTRY_PREFIX=${REGISTRY_PREFIX}" >> $GITHUB_ENV
