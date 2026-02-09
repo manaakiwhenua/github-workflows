@@ -9,6 +9,10 @@
 #
 # This workflow has NO write access to the GitOps repository.
 # It only has permission to trigger pipelines in k8s-apps-config.
+#
+# Runner Options:
+# - ubuntu-latest: GitHub-hosted runners (slower, no persistent cache)
+# - tak-k8s-ci:    Self-hosted K8s runners (faster, central BuildKit cache)
 
 name: CI/CD
 
@@ -25,11 +29,14 @@ jobs:
     with:
       bake_file: docker-bake.hcl
       bake_target: default
+      # Use self-hosted K8s runners for faster builds (central BuildKit cache)
+      # Change to 'ubuntu-latest' for GitHub-hosted runners
+      runs_on: tak-k8s-ci
       # Only push on main branch, not PRs
       push: ${{ github.event_name != 'pull_request' }}
+      registry_host: ${{ vars.ARTIFACTORY_HOST }}
+      registry_username: ${{ vars.ARTIFACTORY_USERNAME }}
     secrets:
-      ARTIFACTORY_HOST: ${{ secrets.ARTIFACTORY_HOST }}
-      ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
       ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
 
   # Deploy to dev (automatic)

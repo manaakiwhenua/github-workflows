@@ -40,3 +40,14 @@ Document any issues that took multiple attempts to resolve here for future refer
      docker restart "$BUILDKIT_CONTAINER"
      ```
   Note: BuildKit uses Alpine Linux, so certs are at `/etc/ssl/certs/ca-certificates.crt`, not `/usr/local/share/ca-certificates/`.
+
+- **docker-bake.hcl tag format**: When using docker-build-pipe, the `REGISTRY_PREFIX` variable already includes the full path up to and including the repo slug (e.g., `artifactory.../docker/mwlr-private/platform-docs`). Do NOT add the repo name again in the tag. For single-target builds, use `tags = ["${REGISTRY_PREFIX}:${IMAGE_TAG}"]` not `tags = ["${REGISTRY_PREFIX}/myapp:${IMAGE_TAG}"]`. Adding the repo name creates a double path like `/platform-docs/platform-docs` which won't match deployment manifests.
+
+- **Central BuildKit for K8s runners**: For maximum build speed on self-hosted K8s runners (tak-k8s-ci), deploy a central BuildKit daemon. This provides:
+  1. **Persistent layer cache** - no cold starts, layers cached across all builds
+  2. **Base image cache** - `FROM` images cached, no re-pull each build
+  3. **Shared across runners** - both Bitbucket and GitHub runners use the same daemon
+  
+  To use with docker-build.yml, set `runs_on: tak-k8s-ci` to run on self-hosted K8s runners. The workflow will automatically try the central BuildKit at `tcp://buildkit.buildkit.svc.cluster.local:1234` before falling back to docker-container driver.
+  
+  Without central BuildKit, each build starts cold with no cache. Registry cache (`cache-from=type=registry`) helps but is slower than local cache due to network I/O.

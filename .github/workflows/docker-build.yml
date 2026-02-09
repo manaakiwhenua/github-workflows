@@ -41,6 +41,14 @@ on:
         description: 'Artifactory username'
         type: string
         required: true
+      runs_on:
+        description: 'Runner to use (ubuntu-latest for GitHub-hosted, tak-k8s-ci for self-hosted K8s)'
+        type: string
+        default: 'ubuntu-latest'
+      buildkit_endpoint:
+        description: 'Central BuildKit endpoint for persistent cache (self-hosted K8s only)'
+        type: string
+        default: 'tcp://buildkit.buildkit.svc.cluster.local:1234'
     secrets:
       ARTIFACTORY_TOKEN:
         required: true
@@ -67,7 +75,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs_on }}
     outputs:
       build_id: ${{ steps.vars.outputs.build_id }}
       image_tag: ${{ steps.vars.outputs.image_tag }}
@@ -144,9 +152,47 @@ jobs:
           
           echo "✓ CA certificate installed for ${REGISTRY_HOST}"
 
+      # Try central BuildKit first (self-hosted K8s runners only)
+      # This provides persistent layer + image cache for faster builds
+      - name: Try central BuildKit
+        id: central-buildkit
+        if: inputs.runs_on != 'ubuntu-latest'
+        continue-on-error: true
+        run: |
+          ENDPOINT="${{ inputs.buildkit_endpoint }}"
+          BUILDER_NAME="central-buildkit"
+          
+          echo "Trying central BuildKit at ${ENDPOINT}..."
+          
+          # Clean up any existing builder
+          docker buildx rm "${BUILDER_NAME}" 2>/dev/null || true
+          
+          # Create builder with remote driver
+          if ! docker buildx create \
+            --name "${BUILDER_NAME}" \
+            --driver remote \
+            "${ENDPOINT}"; then
+            echo "connected=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Verify connection
+          if docker buildx inspect --bootstrap "${BUILDER_NAME}" >/dev/null 2>&1; then
+            docker buildx use "${BUILDER_NAME}"
+            echo "connected=true" >> $GITHUB_OUTPUT
+            echo "✓ Connected to central BuildKit (persistent cache)"
+          else
+            docker buildx rm "${BUILDER_NAME}" 2>/dev/null || true
+            echo "connected=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      # Fall back to docker-container driver if central BuildKit unavailable
       # BuildKit in docker-container driver runs in an isolated container.
       # We set up the builder first, then inject the CA cert into the container.
-      - name: Set up Docker Buildx
+      - name: Set up Docker Buildx (fallback)
+        if: steps.central-buildkit.outcome != 'success'
+        id: buildx-setup
         uses: docker/setup-buildx-action@v3
         with:
           driver: docker-container
@@ -154,9 +200,9 @@ jobs:
             image=moby/buildkit:buildx-stable-1
             network=host
 
-      # Inject CA cert into BuildKit container's trust store
+      # Inject CA cert into BuildKit container's trust store (only for docker-container driver)
       - name: Configure BuildKit CA certificate
-        if: steps.ca-cert.outputs.has_ca_cert == 'true'
+        if: steps.ca-cert.outputs.has_ca_cert == 'true' && steps.central-buildkit.outcome != 'success'
         run: |
           # Get the BuildKit container name
           BUILDKIT_CONTAINER=$(docker ps --filter "name=buildx_buildkit" --format "{{.Names}}" | head -1)
