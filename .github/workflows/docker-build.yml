@@ -139,12 +139,17 @@ jobs:
           # Store the cert for later injection into BuildKit
           echo "$REGISTRY_CA_CERT" > /tmp/registry-ca.crt
           
-          # Restart Docker daemon to pick up new certificates
-          sudo systemctl restart docker
-          
-          # Wait for Docker to be ready
-          sleep 5
-          docker info > /dev/null 2>&1
+          # Restart Docker daemon to pick up new certificates (only on systemd hosts)
+          # DinD runners don't have systemd - certs.d works without restart
+          if command -v systemctl &>/dev/null && systemctl is-system-running &>/dev/null; then
+            echo "Restarting Docker daemon..."
+            sudo systemctl restart docker
+            sleep 5
+            docker info > /dev/null 2>&1
+          else
+            echo "No systemd available (DinD mode), skipping daemon restart"
+            # Docker certs.d directory works without restart for registry operations
+          fi
           
           # Verify TLS connection works
           echo "Testing TLS connection to ${REGISTRY_HOST}..."
