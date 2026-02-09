@@ -51,3 +51,10 @@ Document any issues that took multiple attempts to resolve here for future refer
   To use with docker-build.yml, set `runs_on: tak-k8s-ci` to run on self-hosted K8s runners. The workflow will automatically try the central BuildKit at `tcp://buildkit.buildkit.svc.cluster.local:1234` before falling back to docker-container driver.
   
   Without central BuildKit, each build starts cold with no cache. Registry cache (`cache-from=type=registry`) helps but is slower than local cache due to network I/O.
+
+- **ARC GitHub App requires Actions permission**: The GitHub documentation for ARC authentication (https://docs.github.com/en/actions/tutorials/use-actions-runner-controller/authenticate-to-the-api) does NOT mention this, but the GitHub App **must** have **Actions: Read and write** permission under Repository Permissions. Without it, the listener receives no job events and runners sit idle showing "Waiting for a runner to pick up this job" forever, even though runners are connected and listening. Symptoms:
+  - Listener logs show `"assigned job": 0` continuously
+  - Runner logs show "Connected to GitHub" and "Listening for Jobs"
+  - GitHub UI shows "Waiting for a runner to pick up this job"
+  
+  Fix: Go to GitHub App settings → Permissions → Repository permissions → Actions → set to "Read and write".
