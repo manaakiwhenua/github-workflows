@@ -49,6 +49,19 @@ on:
         description: 'Central BuildKit endpoint for persistent cache (self-hosted K8s only)'
         type: string
         default: 'tcp://buildkit.buildkit.svc.cluster.local:1234'
+      # ----- Harbor (dual-push during Artifactory -> Harbor transition) -----
+      push_to_harbor:
+        description: 'Also push to Harbor and attach build metadata as OCI artifact'
+        type: boolean
+        default: true
+      harbor_host:
+        description: 'Harbor hostname (internal only - needs self-hosted runner)'
+        type: string
+        default: registry.tak-k8s-platform.landcareresearch.co.nz
+      harbor_username:
+        description: 'Harbor robot account name (e.g. robot$github-builder)'
+        type: string
+        default: ''
     secrets:
       ARTIFACTORY_TOKEN:
         required: true
@@ -59,6 +72,9 @@ on:
       REGISTRY_CA_CERT:
         required: false
         description: 'CA certificate for registry TLS verification (PEM format)'
+      HARBOR_TOKEN:
+        required: false
+        description: 'Harbor robot account token. Required when push_to_harbor=true.'
     outputs:
       build_id:
         description: 'Build identifier (run_number-sha)'
@@ -308,6 +324,81 @@ jobs:
           path: build-index.json
           retention-days: 90
 
+      # ----- Harbor dual-push (transition from Artifactory) -----
+      # Re-tags each pushed image to Harbor without rebuilding (imagetools
+      # create copies manifests + layers cross-registry), then attaches the
+      # build metadata as an OCI artifact via oras. Self-hosted runner
+      # required - Harbor is internal-only.
+      - name: Install oras
+        if: inputs.push_to_harbor && inputs.push
+        env:
+          ORAS_VERSION: 1.2.2
+        run: |
+          curl -fsSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin oras
+          oras version
+
+      - name: Login to Harbor
+        if: inputs.push_to_harbor && inputs.push
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ inputs.harbor_host }}
+          username: ${{ inputs.harbor_username }}
+          password: ${{ secrets.HARBOR_TOKEN }}
+
+      - name: Push to Harbor + attach metadata
+        id: harbor
+        if: inputs.push_to_harbor && inputs.push
+        env:
+          HARBOR_HOST: ${{ inputs.harbor_host }}
+          ARTIFACTORY_HOST: ${{ inputs.registry_host }}
+          BAKE_METADATA: ${{ steps.bake.outputs.metadata }}
+        run: |
+          set -euo pipefail
+          ART_PREFIX="${ARTIFACTORY_HOST}/docker/"
+
+          # bake metadata is a JSON object keyed by target name; each target has
+          # containerimage.digest + image.name (comma-separated tag list).
+          echo "$BAKE_METADATA" > bake.json
+
+          mapfile -t TARGETS < <(jq -r 'keys[]' bake.json)
+          HARBOR_REFS=()
+
+          for target in "${TARGETS[@]}"; do
+            digest=$(jq -r --arg t "$target" '.[$t]."containerimage.digest" // empty' bake.json)
+            names=$(jq -r --arg t "$target" '(.[$t]."image.name" // "" | split(",") | map(gsub("^\\s+|\\s+$"; "")) | join(" "))' bake.json)
+            [[ -z "$digest" || -z "$names" ]] && continue
+
+            harbor_primary=""
+            for src_ref in $names; do
+              stripped="${src_ref#"$ART_PREFIX"}"
+              harbor_ref="${HARBOR_HOST}/${stripped}"
+              src_digest="${ART_PREFIX}${stripped%:*}@${digest}"
+              echo "copy: ${src_ref} -> ${harbor_ref}"
+              docker buildx imagetools create --tag "${harbor_ref}" "${src_digest}"
+              [[ -z "$harbor_primary" ]] && harbor_primary="${stripped%:*}"
+            done
+
+            if [[ -n "$harbor_primary" ]]; then
+              subject="${HARBOR_HOST}/${harbor_primary}@${digest}"
+              # Write the target's slice of metadata to a file for attachment
+              jq --arg t "$target" '.[$t]' bake.json > "target-${target}.json"
+              echo "attach metadata: ${subject}"
+              oras attach \
+                --artifact-type application/vnd.landcareresearch.build-metadata+json \
+                --distribution-spec v1.1-referrers-api \
+                "${subject}" \
+                "target-${target}.json:application/json"
+              HARBOR_REFS+=("${target}: ${subject}")
+            fi
+          done
+
+          {
+            echo "harbor_refs<<EOF"
+            printf '%s\n' "${HARBOR_REFS[@]}"
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
       - name: Summary
         run: |
           echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
@@ -321,3 +412,11 @@ jobs:
           echo "### Built Images" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           jq -r '.outputs[] | "- **\(.target)**: `\(.digest)`"' build-index.json >> $GITHUB_STEP_SUMMARY
+
+          if [[ -n "${{ steps.harbor.outputs.harbor_refs }}" ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Harbor (dual-push)" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "${{ steps.harbor.outputs.harbor_refs }}" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
