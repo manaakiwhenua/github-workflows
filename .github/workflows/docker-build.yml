@@ -353,6 +353,9 @@ jobs:
           HARBOR_HOST: ${{ inputs.harbor_host }}
           ARTIFACTORY_HOST: ${{ inputs.registry_host }}
           BAKE_METADATA: ${{ steps.bake.outputs.metadata }}
+          IMAGE_NAME: ${{ steps.vars.outputs.image_name }}
+          BUILD_ID: ${{ steps.vars.outputs.build_id }}
+          HARBOR_BUILDS_PROJECT: builds
         run: |
           set -euo pipefail
           ART_PREFIX="${ARTIFACTORY_HOST}/docker/"
@@ -392,6 +395,22 @@ jobs:
               HARBOR_REFS+=("${target}: ${subject}")
             fi
           done
+
+          # Build index as a tagged OCI artifact in Harbor (Harbor home for the
+          # Artifactory build-index.json). Best-effort during the transition:
+          # Artifactory stays authoritative until consumers cut over, so a
+          # failure here warns but does not fail the build.
+          harbor_build_index_ref="${HARBOR_HOST}/${HARBOR_BUILDS_PROJECT:-builds}/${IMAGE_NAME}:${BUILD_ID}"
+          echo "push build index: ${harbor_build_index_ref}"
+          if oras push \
+               --artifact-type application/vnd.landcareresearch.build-index+json \
+               "${harbor_build_index_ref}" \
+               build-index.json:application/json \
+               bake.json:application/json; then
+            echo "harbor_build_index_ref=${harbor_build_index_ref}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Harbor build-index push failed (non-fatal; Artifactory index still authoritative): ${harbor_build_index_ref}"
+          fi
 
           {
             echo "harbor_refs<<EOF"
