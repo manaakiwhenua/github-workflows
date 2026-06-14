@@ -57,7 +57,7 @@ on:
       harbor_host:
         description: 'Harbor hostname (internal only - needs self-hosted runner)'
         type: string
-        default: registry.tak-k8s-platform.landcareresearch.co.nz
+        default: registry.landcareresearch.co.nz
       harbor_username:
         description: 'Harbor robot account name (e.g. robot$github-builder)'
         type: string
