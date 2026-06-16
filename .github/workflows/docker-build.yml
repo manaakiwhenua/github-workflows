@@ -1,8 +1,15 @@
 # Reusable Docker Build Workflow
 # Equivalent to docker-build-pipe for Bitbucket
 #
-# Builds images using docker buildx bake, pushes to Artifactory,
-# and uploads build metadata JSON for downstream deploy workflows.
+# Builds images using docker buildx bake and pushes them straight to prod
+# Harbor (registry.landcareresearch.co.nz). Per-target build metadata is
+# attached as an OCI artifact (oras attach) and the build-index pushed as a
+# tagged OCI artifact under the `builds` project for downstream deploys.
+#
+# Artifactory push retired (Phase 5, DEVENV-9681). The legacy registry_*
+# inputs / ARTIFACTORY_TOKEN secret are kept defined but no longer drive a
+# push - they remain only so existing caller repos don't break, and so a
+# Dockerfile can still pull an Artifactory base at build time via BAKE_SECRETS.
 
 name: Docker Build
 
@@ -34,13 +41,15 @@ on:
         type: boolean
         default: true
       registry_host:
-        description: 'Artifactory hostname'
+        description: 'Legacy Artifactory hostname (no longer a push target; kept for caller compat / optional build-time base pulls)'
         type: string
-        required: true
+        required: false
+        default: artifactory.landcareresearch.co.nz
       registry_username:
-        description: 'Artifactory username'
+        description: 'Legacy Artifactory username (unused by the push; kept for caller compat)'
         type: string
-        required: true
+        required: false
+        default: ''
       runs_on:
         description: 'Runner to use (ubuntu-latest for GitHub-hosted, tak-k8s-ci for self-hosted K8s)'
         type: string
@@ -49,9 +58,9 @@ on:
         description: 'Central BuildKit endpoint for persistent cache (self-hosted K8s only)'
         type: string
         default: 'tcp://buildkit.buildkit.svc.cluster.local:1234'
-      # ----- Harbor (dual-push during Artifactory -> Harbor transition) -----
+      # ----- Harbor (the primary and only push registry) -----
       push_to_harbor:
-        description: 'Also push to Harbor and attach build metadata as OCI artifact'
+        description: 'DEPRECATED / no-op. Harbor is now the sole push target; kept for caller compat.'
         type: boolean
         default: true
       harbor_host:
@@ -64,8 +73,8 @@ on:
         default: ''
     secrets:
       ARTIFACTORY_TOKEN:
-        required: true
-        description: 'Artifactory identity token'
+        required: false
+        description: 'Legacy Artifactory identity token (no longer used for the push; optional build secret via BAKE_SECRETS)'
       BAKE_SECRETS:
         required: false
         description: 'Build secrets in docker secret format'
@@ -74,7 +83,7 @@ on:
         description: 'CA certificate for registry TLS verification (PEM format)'
       HARBOR_TOKEN:
         required: false
-        description: 'Harbor robot account token. Required when push_to_harbor=true.'
+        description: 'Harbor robot account token. Effectively required - this is the push credential (workflow_call cannot mark it conditionally required).'
     outputs:
       build_id:
         description: 'Build identifier (run_number-sha)'
@@ -86,7 +95,7 @@ on:
         description: 'Registry prefix for images'
         value: ${{ jobs.build.outputs.registry_prefix }}
       metadata_url:
-        description: 'URL to build index JSON'
+        description: 'Harbor OCI ref of the build-index artifact (builds/<namespace>/<image>:<build_id>)'
         value: ${{ jobs.build.outputs.metadata_url }}
 
 jobs:
@@ -96,7 +105,7 @@ jobs:
       build_id: ${{ steps.vars.outputs.build_id }}
       image_tag: ${{ steps.vars.outputs.image_tag }}
       registry_prefix: ${{ steps.vars.outputs.registry_prefix }}
-      metadata_url: ${{ steps.metadata.outputs.metadata_url }}
+      metadata_url: ${{ steps.harbor.outputs.metadata_url }}
 
     steps:
       - name: Checkout
@@ -115,7 +124,9 @@ jobs:
             IMAGE_NAME="${REPO_NAME}"
           fi
           
-          REGISTRY_PREFIX="${{ inputs.registry_host }}/docker/${{ inputs.image_namespace }}/${IMAGE_NAME}"
+          # Push target is now prod Harbor: ${harbor_host}/${namespace}/${image}
+          # (the project == namespace; no Artifactory `/docker/` path segment).
+          REGISTRY_PREFIX="${{ inputs.harbor_host }}/${{ inputs.image_namespace }}/${IMAGE_NAME}"
           
           echo "build_id=${BUILD_ID}" >> $GITHUB_OUTPUT
           echo "image_tag=${BUILD_ID}" >> $GITHUB_OUTPUT
@@ -133,7 +144,7 @@ jobs:
         id: ca-cert
         env:
           REGISTRY_CA_CERT: ${{ secrets.REGISTRY_CA_CERT }}
-          REGISTRY_HOST: ${{ inputs.registry_host }}
+          REGISTRY_HOST: ${{ inputs.harbor_host }}
         run: |
           if [[ -z "$REGISTRY_CA_CERT" ]]; then
             echo "No CA certificate provided, skipping"
@@ -249,12 +260,13 @@ jobs:
           
           echo "✓ CA certificate configured in BuildKit container"
 
-      - name: Login to Artifactory
+      - name: Login to Harbor
+        if: inputs.push
         uses: docker/login-action@v3
         with:
-          registry: ${{ inputs.registry_host }}
-          username: ${{ inputs.registry_username }}
-          password: ${{ secrets.ARTIFACTORY_TOKEN }}
+          registry: ${{ inputs.harbor_host }}
+          username: ${{ inputs.harbor_username }}
+          password: ${{ secrets.HARBOR_TOKEN }}
 
       - name: Build and push
         id: bake
@@ -297,26 +309,6 @@ jobs:
           echo "Build index:"
           cat build-index.json
 
-      - name: Upload build metadata to Artifactory
-        id: metadata
-        if: inputs.push
-        run: |
-          IMAGE_NAME="${{ steps.vars.outputs.image_name }}"
-          BUILD_ID="${{ steps.vars.outputs.build_id }}"
-          METADATA_PATH="docker-build-metadata/${IMAGE_NAME}/builds/${BUILD_ID}"
-          METADATA_URL="https://${{ inputs.registry_host }}/artifactory/${METADATA_PATH}/index.json"
-          
-          echo "Uploading build metadata to: ${METADATA_URL}"
-          
-          curl -fsSL \
-            -H "Authorization: Bearer ${{ secrets.ARTIFACTORY_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -T build-index.json \
-            "${METADATA_URL}"
-          
-          echo "metadata_url=${METADATA_URL}" >> $GITHUB_OUTPUT
-          echo "✓ Metadata uploaded successfully"
-
       - name: Upload build-index as artifact
         uses: actions/upload-artifact@v4
         with:
@@ -324,13 +316,14 @@ jobs:
           path: build-index.json
           retention-days: 90
 
-      # ----- Harbor dual-push (transition from Artifactory) -----
-      # Re-tags each pushed image to Harbor without rebuilding (imagetools
-      # create copies manifests + layers cross-registry), then attaches the
-      # build metadata as an OCI artifact via oras. Self-hosted runner
-      # required - Harbor is internal-only.
+      # ----- Harbor build metadata (images already pushed by bake) -----
+      # bake pushed each target straight to Harbor (REGISTRY_PREFIX is Harbor),
+      # so there is nothing to copy. Attach each target's build metadata to its
+      # already-pushed image as an OCI artifact, and push the build-index as a
+      # tagged OCI artifact under the `builds` project for downstream deploys.
+      # Self-hosted runner required - Harbor is internal-only.
       - name: Install oras
-        if: inputs.push_to_harbor && inputs.push
+        if: inputs.push
         env:
           ORAS_VERSION: 1.2.2
         run: |
@@ -338,27 +331,21 @@ jobs:
             | sudo tar -xz -C /usr/local/bin oras
           oras version
 
-      - name: Login to Harbor
-        if: inputs.push_to_harbor && inputs.push
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ inputs.harbor_host }}
-          username: ${{ inputs.harbor_username }}
-          password: ${{ secrets.HARBOR_TOKEN }}
-
-      - name: Push to Harbor + attach metadata
+      - name: Attach metadata + push build-index
         id: harbor
-        if: inputs.push_to_harbor && inputs.push
+        if: inputs.push
         env:
           HARBOR_HOST: ${{ inputs.harbor_host }}
-          ARTIFACTORY_HOST: ${{ inputs.registry_host }}
           BAKE_METADATA: ${{ steps.bake.outputs.metadata }}
+          IMAGE_NAME: ${{ steps.vars.outputs.image_name }}
+          BUILD_ID: ${{ steps.vars.outputs.build_id }}
+          HARBOR_BUILDS_PROJECT: builds
         run: |
           set -euo pipefail
-          ART_PREFIX="${ARTIFACTORY_HOST}/docker/"
 
           # bake metadata is a JSON object keyed by target name; each target has
-          # containerimage.digest + image.name (comma-separated tag list).
+          # containerimage.digest + image.name (comma-separated tag list). Names
+          # are already Harbor refs (REGISTRY_PREFIX == Harbor).
           echo "$BAKE_METADATA" > bake.json
 
           mapfile -t TARGETS < <(jq -r 'keys[]' bake.json)
@@ -369,29 +356,34 @@ jobs:
             names=$(jq -r --arg t "$target" '(.[$t]."image.name" // "" | split(",") | map(gsub("^\\s+|\\s+$"; "")) | join(" "))' bake.json)
             [[ -z "$digest" || -z "$names" ]] && continue
 
-            harbor_primary=""
-            for src_ref in $names; do
-              stripped="${src_ref#"$ART_PREFIX"}"
-              harbor_ref="${HARBOR_HOST}/${stripped}"
-              src_digest="${ART_PREFIX}${stripped%:*}@${digest}"
-              echo "copy: ${src_ref} -> ${harbor_ref}"
-              docker buildx imagetools create --tag "${harbor_ref}" "${src_digest}"
-              [[ -z "$harbor_primary" ]] && harbor_primary="${stripped%:*}"
-            done
+            # First tag (sans :tag) is the repository the metadata attaches to.
+            primary=""
+            for ref in $names; do primary="${ref%:*}"; break; done
+            [[ -z "$primary" ]] && continue
 
-            if [[ -n "$harbor_primary" ]]; then
-              subject="${HARBOR_HOST}/${harbor_primary}@${digest}"
-              # Write the target's slice of metadata to a file for attachment
-              jq --arg t "$target" '.[$t]' bake.json > "target-${target}.json"
-              echo "attach metadata: ${subject}"
-              oras attach \
-                --artifact-type application/vnd.landcareresearch.build-metadata+json \
-                --distribution-spec v1.1-referrers-api \
-                "${subject}" \
-                "target-${target}.json:application/json"
-              HARBOR_REFS+=("${target}: ${subject}")
-            fi
+            subject="${primary}@${digest}"
+            jq --arg t "$target" '.[$t]' bake.json > "target-${target}.json"
+            echo "attach metadata: ${subject}"
+            oras attach \
+              --artifact-type application/vnd.landcareresearch.build-metadata+json \
+              --distribution-spec v1.1-referrers-api \
+              "${subject}" \
+              "target-${target}.json:application/json"
+            HARBOR_REFS+=("${target}: ${subject}")
           done
+
+          # Build index as a tagged OCI artifact under the builds project - the
+          # Harbor home of what was the Artifactory build-index.json. Path
+          # contract: builds/<image_name>:<build_id> (no namespace) - matches
+          # docker-build-pipe run.sh + k8s-apps-config update-app-manifest.sh.
+          harbor_build_index_ref="${HARBOR_HOST}/${HARBOR_BUILDS_PROJECT:-builds}/${IMAGE_NAME}:${BUILD_ID}"
+          echo "push build index: ${harbor_build_index_ref}"
+          oras push \
+            --artifact-type application/vnd.landcareresearch.build-index+json \
+            "${harbor_build_index_ref}" \
+            build-index.json:application/json \
+            bake.json:application/json
+          echo "metadata_url=${harbor_build_index_ref}" >> "$GITHUB_OUTPUT"
 
           {
             echo "harbor_refs<<EOF"
@@ -407,7 +399,7 @@ jobs:
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Build ID | \`${{ steps.vars.outputs.build_id }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Registry | \`${{ steps.vars.outputs.registry_prefix }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Metadata | [${{ steps.metadata.outputs.metadata_url }}](${{ steps.metadata.outputs.metadata_url }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build index | \`${{ steps.harbor.outputs.metadata_url }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Built Images" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -415,7 +407,7 @@ jobs:
 
           if [[ -n "${{ steps.harbor.outputs.harbor_refs }}" ]]; then
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### Harbor (dual-push)" >> $GITHUB_STEP_SUMMARY
+            echo "### Harbor (metadata attached)" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             echo "${{ steps.harbor.outputs.harbor_refs }}" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
