@@ -12,8 +12,15 @@ inputs:
     description: 'Target cluster (tak-k8s-nonprod, tak-k8s-platform, tak-k8s-prod)'
     required: true
   build_key:
-    description: 'Build key / image tag (e.g., 249-abc123). Used to look up build metadata from Artifactory.'
+    description: 'Build key / image tag (e.g., 249-abc123). Used to look up build metadata (Harbor OCI artifact, Artifactory fallback).'
     required: true
+  image_project:
+    description: >-
+      Image/repo slug used for the build-metadata lookup and the image-ref match.
+      Defaults to app_name. Set this for multi-repo apps, where several repos build
+      images that deploy into one k8s app (e.g. app_name=edr-dde, image_project=edr-dde-api).
+    required: false
+    default: ''
   bitbucket_token:
     description: 'Bitbucket access token with pipelines:write scope for k8s-apps-config'
     required: true
@@ -64,7 +71,8 @@ runs:
               { "key": "APP_NAME", "value": "${{ inputs.app_name }}" },
               { "key": "ENVIRONMENT", "value": "${{ inputs.environment }}" },
               { "key": "CLUSTER", "value": "${{ inputs.cluster }}" },
-              { "key": "BUILD_KEY", "value": "${{ inputs.build_key }}" }
+              { "key": "BUILD_KEY", "value": "${{ inputs.build_key }}" },
+              { "key": "IMAGE_PROJECT", "value": "${{ inputs.image_project || inputs.app_name }}" }
             ]
           }')
         
