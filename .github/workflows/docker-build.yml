@@ -378,11 +378,18 @@ jobs:
           # docker-build-pipe run.sh + k8s-apps-config update-app-manifest.sh.
           harbor_build_index_ref="${HARBOR_HOST}/${HARBOR_BUILDS_PROJECT:-builds}/${IMAGE_NAME}:${BUILD_ID}"
           echo "push build index: ${harbor_build_index_ref}"
+          # The consumer (k8s-apps-config update-app-manifest.sh) and the
+          # Bitbucket docker-build-pipe use the blob names outputs.json /
+          # bake-metadata.json; oras uses the filename as the blob title, so push
+          # under those names or a GitHub-built index is invisible to the deploy
+          # step (it checks for outputs.json) and falls back to retired Artifactory.
+          cp build-index.json outputs.json
+          cp bake.json bake-metadata.json
           oras push \
             --artifact-type application/vnd.landcareresearch.build-index+json \
             "${harbor_build_index_ref}" \
-            build-index.json:application/json \
-            bake.json:application/json
+            outputs.json:application/json \
+            bake-metadata.json:application/json
           echo "metadata_url=${harbor_build_index_ref}" >> "$GITHUB_OUTPUT"
 
           {
