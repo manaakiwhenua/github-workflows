@@ -41,7 +41,7 @@ Reusable GitHub Actions workflows for building Docker images with secure GitOps 
 
 | Component | Access Level | Why |
 |-----------|--------------|-----|
-| GitHub Actions (source repos) | Artifactory only | Can't modify GitOps = can't affect prod |
+| GitHub Actions (source repos) | Harbor only | Can't modify GitOps = can't affect prod |
 | ArgoCD Image Updater | GitOps repo write | Runs in-cluster, uses existing ArgoCD credentials |
 | Prod deployments | Require PR approval | Human review before production changes |
 
@@ -74,6 +74,8 @@ jobs:
 ### k8s-promote.yml (Optional)
 
 Generates promotion information for manual PR-based deployments. Useful for prod environments.
+Reads the build index that `docker-build.yml` pushed to Harbor (`builds/<image_name>:<build_id>`).
+Harbor is internal-only, so run it on a self-hosted runner.
 
 ```yaml
 jobs:
@@ -82,8 +84,10 @@ jobs:
     with:
       environment: prod
       build_id: ${{ needs.build.outputs.build_id }}
+      harbor_username: robot$github-builder
+      runs_on: tak-k8s-ci
     secrets:
-      ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+      HARBOR_TOKEN: ${{ secrets.HARBOR_TOKEN }}
 ```
 
 ## Setup
