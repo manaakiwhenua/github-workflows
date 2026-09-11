@@ -32,16 +32,30 @@ on:
         type: string
         default: ''
       image_namespace:
-        description: 'Image namespace in registry'
+        description: 'Image namespace (Harbor project) in registry'
         type: string
         default: mwlr-private
+      # ----- Harbor (holds the images and the build index) -----
+      harbor_host:
+        description: 'Harbor hostname (internal only - needs self-hosted runner)'
+        type: string
+        default: registry.landcareresearch.co.nz
+      harbor_username:
+        description: 'Harbor robot account name able to read the builds project (e.g. robot$github-builder)'
+        type: string
+        default: ''
+      harbor_builds_project:
+        description: 'Harbor project holding build indexes (as pushed by docker-build.yml)'
+        type: string
+        default: builds
+      runs_on:
+        description: 'Runner to use. Harbor is internal-only, so this must be a self-hosted runner (e.g. tak-k8s-ci); ubuntu-latest cannot reach it.'
+        type: string
+        default: 'ubuntu-latest'
     secrets:
-      ARTIFACTORY_HOST:
-        required: false
-        description: 'Artifactory hostname (defaults to artifactory.landcareresearch.co.nz)'
-      ARTIFACTORY_TOKEN:
+      HARBOR_TOKEN:
         required: true
-        description: 'Artifactory token for fetching build metadata'
+        description: 'Harbor robot account token for fetching the build index'
     outputs:
       promotion_info:
         description: 'JSON with promotion details for creating PR manually or via other automation'
@@ -49,7 +63,7 @@ on:
 
 jobs:
   prepare-promotion:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs_on }}
     environment: ${{ inputs.environment }}
     outputs:
       promotion_info: ${{ steps.output.outputs.promotion_info }}
@@ -63,32 +77,46 @@ jobs:
             APP_NAME="${{ github.event.repository.name }}"
           fi
           
-          ARTIFACTORY_HOST="${{ secrets.ARTIFACTORY_HOST }}"
-          if [[ -z "$ARTIFACTORY_HOST" ]]; then
-            ARTIFACTORY_HOST="artifactory.landcareresearch.co.nz"
-          fi
+          HARBOR_HOST="${{ inputs.harbor_host }}"
           
+          # Images live at ${harbor_host}/${namespace}/${app} (the Harbor project is
+          # the namespace; there is no Artifactory `/docker/` path segment).
+          # The build index is the OCI artifact docker-build.yml pushes to
+          # ${harbor_host}/builds/<image_name>:<build_id> - so app_name must match
+          # the image_name the build used (both default to the repository name).
           echo "app_name=${APP_NAME}" >> $GITHUB_OUTPUT
-          echo "artifactory_host=${ARTIFACTORY_HOST}" >> $GITHUB_OUTPUT
-          echo "image_registry=${ARTIFACTORY_HOST}/docker/${{ inputs.image_namespace }}/${APP_NAME}" >> $GITHUB_OUTPUT
+          echo "image_registry=${HARBOR_HOST}/${{ inputs.image_namespace }}/${APP_NAME}" >> $GITHUB_OUTPUT
+          echo "build_index_ref=${HARBOR_HOST}/${{ inputs.harbor_builds_project }}/${APP_NAME}:${{ inputs.build_id }}" >> $GITHUB_OUTPUT
+
+      - name: Install oras
+        env:
+          ORAS_VERSION: 1.2.2
+        run: |
+          curl -fsSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin oras
+          oras version
 
       - name: Fetch build metadata
         id: metadata
+        env:
+          BUILD_INDEX_REF: ${{ steps.vars.outputs.build_index_ref }}
+          HARBOR_USERNAME: ${{ inputs.harbor_username }}
+          HARBOR_TOKEN: ${{ secrets.HARBOR_TOKEN }}
         run: |
-          APP_NAME="${{ steps.vars.outputs.app_name }}"
-          BUILD_ID="${{ inputs.build_id }}"
-          ARTIFACTORY_HOST="${{ steps.vars.outputs.artifactory_host }}"
+          set -euo pipefail
           
-          METADATA_URL="https://${ARTIFACTORY_HOST}/artifactory/docker-build-metadata/${APP_NAME}/builds/${BUILD_ID}/index.json"
+          # The build index is a tagged OCI artifact in Harbor with two layers,
+          # outputs.json (the index) and bake-metadata.json - the same artefact
+          # k8s-apps-config's update-app-manifest.sh pulls.
+          echo "Fetching build index from: ${BUILD_INDEX_REF}"
           
-          echo "Fetching build metadata from: ${METADATA_URL}"
-          
-          if ! curl -fsSL \
-            -H "Authorization: Bearer ${{ secrets.ARTIFACTORY_TOKEN }}" \
-            "${METADATA_URL}" > build-index.json; then
-            echo "::error::Failed to fetch build metadata from ${METADATA_URL}"
+          rm -rf build-index && mkdir -p build-index
+          if ! echo "${HARBOR_TOKEN}" | oras pull -u "${HARBOR_USERNAME}" --password-stdin \
+               "${BUILD_INDEX_REF}" -o build-index || [[ ! -s build-index/outputs.json ]]; then
+            echo "::error::Failed to fetch the build index ${BUILD_INDEX_REF} from Harbor (check the build pushed it, and that harbor_username / HARBOR_TOKEN can read the ${{ inputs.harbor_builds_project }} project)"
             exit 1
           fi
+          cp build-index/outputs.json build-index.json
           
           echo "Build index contents:"
           cat build-index.json
