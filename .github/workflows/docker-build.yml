@@ -286,16 +286,30 @@ jobs:
 
       - name: Parse bake metadata
         id: parse
+        # Every value below reaches the script through the environment, never by
+        # expansion into the script text. bake's metadata carries buildkit
+        # provenance, which includes the event payload - a pull request title or
+        # body, which anyone who can open a pull request writes. Expanded into
+        # the script, that text is shell input: a quote ends the string and what
+        # follows runs on the runner. It also broke ordinary builds, since an
+        # apostrophe in a pull request body was enough (PE-663).
+        env:
+          BAKE_METADATA: ${{ steps.bake.outputs.metadata }}
+          BUILD_ID: ${{ steps.vars.outputs.build_id }}
+          GIT_ORIGIN: ${{ github.server_url }}/${{ github.repository }}
+          GIT_REVISION: ${{ github.sha }}
+          GIT_REF: ${{ github.ref }}
         run: |
-          # Extract metadata from bake output
-          BAKE_METADATA='${{ steps.bake.outputs.metadata }}'
-          
           # Create index.json matching docker-build-pipe format
-          echo "$BAKE_METADATA" | jq '{
-            build_id: "${{ steps.vars.outputs.build_id }}",
-            git_origin: "${{ github.server_url }}/${{ github.repository }}",
-            git_revision: "${{ github.sha }}",
-            git_ref: "${{ github.ref }}",
+          printf '%s' "$BAKE_METADATA" | jq \
+            --arg build_id "$BUILD_ID" \
+            --arg git_origin "$GIT_ORIGIN" \
+            --arg git_revision "$GIT_REVISION" \
+            --arg git_ref "$GIT_REF" '{
+            build_id: $build_id,
+            git_origin: $git_origin,
+            git_revision: $git_revision,
+            git_ref: $git_ref,
             timestamp: (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
             outputs: [
               to_entries[] | {
