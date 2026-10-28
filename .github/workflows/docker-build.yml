@@ -6,10 +6,9 @@
 # attached as an OCI artifact (oras attach) and the build-index pushed as a
 # tagged OCI artifact under the `builds` project for downstream deploys.
 #
-# Artifactory push retired (Phase 5, DEVENV-9681). The legacy registry_*
-# inputs / ARTIFACTORY_TOKEN secret are kept defined but no longer drive a
-# push - they remain only so existing caller repos don't break, and so a
-# Dockerfile can still pull an Artifactory base at build time via BAKE_SECRETS.
+# Artifactory push retired (Phase 5, DEVENV-9681) and the server decommissioned
+# (DEVENV-9847, 2026-09-11); the legacy registry_* inputs and ARTIFACTORY_TOKEN
+# secret were removed under DEVENV-9849 (no caller used them).
 
 name: Docker Build
 
@@ -40,16 +39,6 @@ on:
         description: 'Push images to registry'
         type: boolean
         default: true
-      registry_host:
-        description: 'Legacy Artifactory hostname (no longer a push target; kept for caller compat / optional build-time base pulls)'
-        type: string
-        required: false
-        default: artifactory.landcareresearch.co.nz
-      registry_username:
-        description: 'Legacy Artifactory username (unused by the push; kept for caller compat)'
-        type: string
-        required: false
-        default: ''
       runs_on:
         description: 'Runner to use (ubuntu-latest for GitHub-hosted, tak-k8s-ci for self-hosted K8s)'
         type: string
@@ -72,9 +61,6 @@ on:
         type: string
         default: ''
     secrets:
-      ARTIFACTORY_TOKEN:
-        required: false
-        description: 'Legacy Artifactory identity token (no longer used for the push; optional build secret via BAKE_SECRETS)'
       BAKE_SECRETS:
         required: false
         description: 'Build secrets in docker secret format'
@@ -125,7 +111,7 @@ jobs:
           fi
           
           # Push target is now prod Harbor: ${harbor_host}/${namespace}/${image}
-          # (the project == namespace; no Artifactory `/docker/` path segment).
+          # (the project == namespace).
           REGISTRY_PREFIX="${{ inputs.harbor_host }}/${{ inputs.image_namespace }}/${IMAGE_NAME}"
           
           echo "build_id=${BUILD_ID}" >> $GITHUB_OUTPUT
@@ -387,7 +373,7 @@ jobs:
           done
 
           # Build index as a tagged OCI artifact under the builds project - the
-          # Harbor home of what was the Artifactory build-index.json. Path
+          # Path
           # contract: builds/<image_name>:<build_id> (no namespace) - matches
           # docker-build-pipe run.sh + k8s-apps-config update-app-manifest.sh.
           harbor_build_index_ref="${HARBOR_HOST}/${HARBOR_BUILDS_PROJECT:-builds}/${IMAGE_NAME}:${BUILD_ID}"
@@ -396,7 +382,7 @@ jobs:
           # Bitbucket docker-build-pipe use the blob names outputs.json /
           # bake-metadata.json; oras uses the filename as the blob title, so push
           # under those names or a GitHub-built index is invisible to the deploy
-          # step (it checks for outputs.json) and falls back to retired Artifactory.
+          # step (it checks for outputs.json).
           cp build-index.json outputs.json
           cp bake.json bake-metadata.json
           oras push \

@@ -1,7 +1,7 @@
 # Example: Complete CI/CD workflow for a consumer repository
 #
 # Security Model:
-# - CI builds and pushes images to Artifactory
+# - CI builds and pushes images to Harbor (registry.landcareresearch.co.nz)
 # - Deploy step triggers k8s-apps-config pipeline (no direct GitOps write access)
 # - k8s-apps-config validates request and commits/creates PR
 # - Nonprod: direct commit to main
@@ -34,10 +34,9 @@ jobs:
       runs_on: tak-k8s-ci
       # Only push on main branch, not PRs
       push: ${{ github.event_name != 'pull_request' }}
-      registry_host: ${{ vars.ARTIFACTORY_HOST }}
-      registry_username: ${{ vars.ARTIFACTORY_USERNAME }}
+      harbor_username: robot$github-builder
     secrets:
-      ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+      HARBOR_TOKEN: ${{ secrets.HARBOR_TOKEN }}
 
   # Deploy to dev (automatic)
   deploy-dev:
