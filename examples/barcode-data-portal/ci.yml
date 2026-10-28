@@ -1,14 +1,12 @@
 # CI/CD workflow for barcode-data-portal-mwlr
 #
 # Security Model:
-# - CI builds and pushes images to Artifactory
+# - CI builds and pushes images to Harbor (registry.landcareresearch.co.nz)
 # - ArgoCD Image Updater automatically deploys to dev
 # - NO GitOps repo access from CI
 #
 # Required secrets:
-# - ARTIFACTORY_HOST
-# - ARTIFACTORY_USERNAME  
-# - ARTIFACTORY_TOKEN
+# - HARBOR_TOKEN (token for the robot named in harbor_username)
 
 name: CI/CD
 
@@ -25,10 +23,10 @@ jobs:
       bake_file: docker-bake.hcl
       bake_target: default
       push: ${{ github.event_name != 'pull_request' }}
+      harbor_username: robot$github-builder
+      runs_on: tak-k8s-ci
     secrets:
-      ARTIFACTORY_HOST: ${{ secrets.ARTIFACTORY_HOST }}
-      ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
-      ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+      HARBOR_TOKEN: ${{ secrets.HARBOR_TOKEN }}
 
   summary:
     needs: build

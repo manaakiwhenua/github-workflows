@@ -6,7 +6,7 @@ Reusable GitHub Actions workflows for building Docker images with secure GitOps 
 
 ```
 ┌─────────────────────┐     ┌─────────────────────┐
-│  GitHub Repo        │     │  Artifactory        │
+│  GitHub Repo        │     │  Harbor             │
 │  (source code)      │────►│  (container images) │
 │                     │     │                     │
 │  • Builds images    │     └──────────┬──────────┘
@@ -51,7 +51,7 @@ Reusable GitHub Actions workflows for building Docker images with secure GitOps 
 
 ### docker-build.yml
 
-Builds Docker images using `docker buildx bake`, pushes to Artifactory, and uploads build metadata.
+Builds Docker images using `docker buildx bake`, pushes them to Harbor (`registry.landcareresearch.co.nz`) and pushes the build index as an OCI artifact. Harbor is internal-only, so builds run on the self-hosted `tak-k8s-ci` runner.
 
 ```yaml
 jobs:
@@ -60,10 +60,10 @@ jobs:
     with:
       bake_file: docker-bake.hcl
       bake_target: default
+      harbor_username: robot$github-builder
+      runs_on: tak-k8s-ci
     secrets:
-      ARTIFACTORY_HOST: ${{ secrets.ARTIFACTORY_HOST }}
-      ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
-      ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+      HARBOR_TOKEN: ${{ secrets.HARBOR_TOKEN }}
 ```
 
 **Outputs:**
@@ -98,9 +98,7 @@ Configure these secrets in your GitHub organization or repository:
 
 | Secret | Description |
 |--------|-------------|
-| `ARTIFACTORY_HOST` | Artifactory hostname (e.g., `artifactory.landcareresearch.co.nz`) |
-| `ARTIFACTORY_USERNAME` | Artifactory username |
-| `ARTIFACTORY_TOKEN` | Artifactory identity token |
+| `HARBOR_TOKEN` | Token for the Harbor push robot named in the `harbor_username` input (e.g. `robot$github-builder`) |
 
 **Note:** No GitOps credentials needed! Image Updater handles deployment.
 
@@ -138,7 +136,7 @@ metadata:
   name: dev-my-app
   annotations:
     argocd-image-updater.argoproj.io/image-list: |
-      app=artifactory.landcareresearch.co.nz/docker/mwlr-private/my-app/app
+      app=registry.landcareresearch.co.nz/mwlr-private/my-app/app
     argocd-image-updater.argoproj.io/app.update-strategy: newest-build
     argocd-image-updater.argoproj.io/app.allow-tags: "regexp:^[0-9]+-[a-f0-9]+$"
     argocd-image-updater.argoproj.io/write-back-method: git
@@ -177,10 +175,10 @@ jobs:
       bake_file: docker-bake.hcl
       bake_target: default
       push: ${{ github.event_name != 'pull_request' }}
+      harbor_username: robot$github-builder
+      runs_on: tak-k8s-ci
     secrets:
-      ARTIFACTORY_HOST: ${{ secrets.ARTIFACTORY_HOST }}
-      ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
-      ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+      HARBOR_TOKEN: ${{ secrets.HARBOR_TOKEN }}
 
   summary:
     needs: build

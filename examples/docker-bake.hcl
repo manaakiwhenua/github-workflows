@@ -5,7 +5,7 @@
 
 // Variables provided by the build workflow
 variable "REGISTRY_PREFIX" {
-  description = "Registry path prefix (e.g., artifactory.example.com/docker/mwlr-private/my-app)"
+  description = "Registry path prefix (e.g., registry.landcareresearch.co.nz/mwlr-private/my-app)"
 }
 
 variable "IMAGE_TAG" {
@@ -54,7 +54,7 @@ target "worker" {
 // Example: Build with secrets (e.g., private package registry)
 // target "app-with-secrets" {
 //   inherits   = ["app"]
-//   secret     = ["type=env,id=ARTIFACTORY_TOKEN"]
+//   secret     = ["type=env,id=GITHUB_PACKAGES_READ_TOKEN"]
 // }
 
 // Example: Multi-stage build with different context
